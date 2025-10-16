@@ -38,6 +38,10 @@ struct FMT {
     int countBytes() {
         return (M + E + 1) / 4;
     }
+
+    int mantBytes() {
+        return (M + 4) / 4;
+    }
 };
 
 struct Decode {
@@ -71,7 +75,7 @@ string valueString(uint32_t num, FMT F) {
     if (d.isNan) return "nan";
     if (d.isInf) return d.sign ? "-inf" : "inf";
     if (d.isZero) {
-        string mant(F.countBytes(), '0');
+        string mant(F.mantBytes(), '0');
         return string(d.sign ? "-" : "") + "0x0." + mant + "p+0";
     }
     if (d.isDenorm) {
@@ -85,7 +89,7 @@ string valueString(uint32_t num, FMT F) {
     }
     mant <<= ((F.M + 4) / 4 * 4 - F.M);
     ostringstream os;
-    os << hex << setw((F.M + 4) / 4) << setfill('0') << mant;
+    os << hex << setw(F.mantBytes()) << setfill('0') << mant;
     return string(d.sign ? "-" : "") + "0x1." + os.str() + "p" + string(exp >= 0 ? "+" : "") + to_string(exp);
 }
 
