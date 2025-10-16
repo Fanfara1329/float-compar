@@ -11,6 +11,13 @@
 
 using namespace std;
 
+// a0 b1 c2 d3 e4 f5
+map<string, string> dhex = {
+    {"0000", "0"}, {"0001", "1"}, {"0010", "2"}, {"0011", "3"}, {"0100", "4"}, {"0101", "5"}, {"0110", "6"},
+    {"0111", "7"}, {"1000", "8"}, {"1001", "9"}, {"1010", "a"}, {"1011", "b"}, {"1100", "c"}, {"1101", "d"},
+    {"1110", "e"}, {"1111", "f"}
+};
+
 struct FMT {
     int M, E, val; // mantissa exp value_of_exp
     uint32_t EXP_MASK, MANT_MASK, SING_MASK;
@@ -81,7 +88,7 @@ string valueString(uint32_t num, FMT F) {
     } else {
         exp = d.e - F.val;
     }
-    mant <<= 2;
+    mant <<= ((F.M + 4) / 4 * 4 - F.M);
     ostringstream os;
     os << hex << setw((F.M + 4) / 4) << setfill('0') << mant;
     return string(d.sign ? "-" : "") + "0x1." + os.str() + "p" + string(exp >= 0 ? "+" : "") + to_string(exp);
@@ -113,3 +120,4 @@ int main(int argc, char *argv[]) {
     if (argc == 7) {
     }
     return 0;
+}
