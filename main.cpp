@@ -3,182 +3,113 @@
 #include <cstdint>
 #include <math.h>
 #include <bitset>
-#include <map>
-#include <limits>
 #include <vector>
-#include <iostream>
 #include <fstream>
-#include <sstream>
+#include <iomanip>
+#include <map>
+
 
 using namespace std;
-uint16_t MAX_EXPS = 0xffu, MAX_EXPH = 0x1fu;
-uint32_t MAX_MANTS = 0x7fffffu;
-uint16_t MAX_MANH = 0x7ffu;
 
-map<string, string> dhex = {
-    {"0000", "0"}, {"0001", "1"}, {"0010", "2"}, {"0011", "3"}, {"0100", "4"}, {"0101", "5"}, {"0110", "6"},
-    {"0111", "7"}, {"1000", "8"}, {"1001", "9"}, {"1010", "a"}, {"1011", "b"}, {"1100", "c"}, {"1101", "d"},
-    {"1110", "e"}, {"1111", "f"}
+struct FMT {
+    int M, E, val; // mantissa exp value_of_exp
+    uint32_t EXP_MASK, MANT_MASK, SING_MASK;
+
+    FMT(string s) {
+        if (s == "h") {
+            this->M = 10;
+            this->E = 5;
+            this->val = 15;
+            this->EXP_MASK = 0x1f;
+            this->SING_MASK = 0x8000;
+            this->MANT_MASK = 0x3ff;
+        } else {
+            this->M = 23;
+            this->E = 8;
+            this->val = 127;
+            this->EXP_MASK = 0xff;
+            this->SING_MASK = 0x80000000;
+            this->MANT_MASK = 0x7fffff;
+        }
+    }
+
+    int countBytes() {
+        return (M + E + 1) / 4;
+    }
 };
 
-int parseHex(char o) {
-    if ('0' <= o && o <= '9') {
-        return o - '0';
+struct Decode {
+    bool sign, isNan, isInf, isZero, isDenorm;
+    uint32_t m, e;
+
+    Decode(uint32_t num, FMT F) {
+        this->sign = num & F.SING_MASK;
+        this->e = (num >> F.M) & F.EXP_MASK;
+        this->m = num & F.MANT_MASK;
+        this->isNan = ((e == F.EXP_MASK) && m);
+        this->isInf = ((e == F.EXP_MASK) && !m);
+        this->isZero = (!e && !m);
+        this->isDenorm = (!e && m);
     }
-    if ('A' <= o && o <= 'Z') {
-        return o - 'A' + 10;
+};
+
+int firstBit(uint32_t m) {
+    int cnt = 0;
+    while (m >> cnt) {
+        cnt++;
     }
-    if ('a' <= o && o <= 'z') {
-        return o - 'a' + 10;
-    }
-    return 0;
+    return cnt;
 }
 
-bool sings(uint32_t num) {
-    return (num >> 31) & 0x1;
-}
+string valueString(uint32_t num, FMT F) {
+    Decode d = Decode(num, F);
+    int exp = 0;
+    uint32_t mant = d.m;
 
-bool singh(uint16_t num) {
-    return (num >> 15) & 0x1;
-}
-
-int exps(uint32_t num) {
-    return static_cast<uint16_t>((num >> 23) & MAX_EXPS);
-} // uint8_t не робит
-
-uint16_t exph(uint16_t num) {
-    return static_cast<uint16_t>((num >> 10) & MAX_EXPH);
-} // uint8_t не робит
-
-uint32_t mants(uint32_t num) {
-    return num & MAX_MANTS;
-}
-
-uint16_t manth(uint16_t num) {
-    return num & MAX_MANH;
-}
-
-void prints(uint32_t num) {
-    cout << "sign: " << sings(num) << "\n" << "exp: " << exps(num) << "\n" << "mant: " << mants(num) << "\n";
-} //helpful
-
-void printh(uint16_t num) {
-    cout << "sign: " << singh(num) << "\n" << "exp: " << exph(num) << "\n" << "mant: " << manth(num) << "\n";
-} //helpful
-
-
-void printS(bool f, uint16_t exp, uint32_t mant) {
-    bitset<32> bs((f << 31) + (exp << 23) + mant);
-    string s = "", a = "0x";
-    for (int i = 31; i > -1; i -= 4) {
-        s = "";
-        for (int j = i; j > i - 4; j--) {
-            s += std::to_string(bs[j]);
-        }
-        a += dhex[s];
+    if (d.isNan) return "nan";
+    if (d.isInf) return d.sign ? "-inf" : "inf";
+    if (d.isZero) {
+        string mant(F.countBytes(), '0');
+        return string(d.sign ? "-" : "") + "0x0." + mant + "p+0";
     }
-    cout << a << "\n";
-    return;
-}
-
-void bitsets(string &n) {
-    if (n.size() > 10) n = n.substr(n.size() - 10);
-    uint32_t num = static_cast<uint32_t>(stoul(n, nullptr, 0));
-
-    // s, exp, mant
-    bool f = sings(num);
-    int exp = exps(num);
-    uint32_t mant = mants(num);
-    prints(num);
-
-    //NAN
-    if (exp == MAX_EXPS && mant) {
-        cout << "nan ";
-        printS(f, exp, mant);
-        return;
-    }
-
-    //INF
-    if (exp == MAX_EXPH && !mant) {
-        if (f) cout << "-";
-        cout << "inf ";
-        printS(f, exp, mant);
-        return;
-    }
-
-    //exp == 0
-    if (!exp) {
-        if (!mant) {
-            cout << "";
-            return;
-        }
-        int sf = 0;
-        mant <<= 9;
-        while (((mant << sf) & 0x80000000u) == 0) {
-            sf++;
-        }
-        mant <<= (sf + 1);
-        bitset<32> mantb(mant);
-        sf += 15;
-        if (f) cout << '-';
-        cout << "0x1.";
-        string s = "";
-        for (int i = 31; i > 8; i -= 4) {
-            s = "";
-            for (int j = i; j > i - 4; j--) {
-                s += std::to_string(mantb[j]);
-            }
-            cout << dhex[s];
-        }
-        cout << "p-" << sf << " ";
-        printS(sings(num), exps(num), mants(num));
-        return;
-    }
-
-    // адекваты
-    exp -= 127;
-    if (f) cout << '-';
-    cout << "0x1.";
-    mant <<= 1;
-    bitset<24> mantb(mant);
-    string s = "";
-    for (int i = 23; i > -1; i -= 4) {
-        s = "";
-        for (int j = i; j > i - 4; j--) {
-            s += std::to_string(mantb[j]);
-        }
-        cout << dhex[s];
-    }
-    cout << 'p';
-    if (exp < 0) {
-        cout << exp << ' ';
+    if (d.isDenorm) {
+        int fb = F.M - firstBit(d.m);
+        exp = fb + F.val;
+        mant <<= (fb + 1);
+        mant &= F.MANT_MASK;
+        exp = -exp;
     } else {
-        cout << '+' << exp << ' ';
+        exp = d.e - F.val;
     }
-    printS(sings(num), exps(num), mants(num));
+    mant <<= 2;
+    ostringstream os;
+    os << hex << setw((F.M + 4) / 4) << setfill('0') << mant;
+    return string(d.sign ? "-" : "") + "0x1." + os.str() + "p" + string(exp >= 0 ? "+" : "") + to_string(exp);
 }
 
-void bitseth(string &num) {
-
+string hexString(uint32_t num, FMT F) {
+    int b = (F.M + F.E + 1) / 4;
+    ostringstream os;
+    os << "0x" << uppercase << hex << setw(b) << setfill('0') << num;
+    return os.str();
 }
 
+uint32_t parseHexUseLowBits(string s, FMT F) {
+    int bytes = F.countBytes();
+    if (s.size() > 2 + bytes) s = "0x" + s.substr(s.size() - bytes, bytes);
+    return static_cast<uint32_t>(stoul(s, nullptr, 0));
+}
 
-int main_(int argc, char *argv[]) {
+int main(int argc, char *argv[]) {
+    FMT F = FMT(argv[1]);
+
     if (argc == 4) {
-        string fmt = argv[1], roundum = argv[2], num = argv[3];
-        if (fmt == "s") {
-            bitsets(num);
-        }
-        if (fmt == "h") {
-            bitseth(num);
-        }
-    } else if (argc == 6) {
-        string fmt = argv[1], roundum = argv[2], sign = argv[3], num1 = argv[4], num2 = argv[5];
-    } else if (argc == 7) {
+        uint32_t num = parseHexUseLowBits(argv[3], F);
+        string val = valueString(num, F), h = hexString(num, F);
+        cout << val << " " << h << "\n";
+    }
+    if (argc == 6) {
+    }
+    if (argc == 7) {
     }
     return 0;
-}
-
-
-//0001 0111 1 2 4 16 = 23 - 104 40 8
-//0110 1000 инверсия всего кроме 0
