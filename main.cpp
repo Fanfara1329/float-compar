@@ -8,11 +8,9 @@
 #include <iomanip>
 #include <map>
 
-
 using namespace std;
 
 // a0 b1 c2 d3 e4 f5
-
 struct FMT {
     int M, E, val; // mantissa exp value_of_exp
     uint32_t EXP_MASK, MANT_MASK, SING_MASK;
@@ -35,12 +33,11 @@ struct FMT {
         }
     }
 
-    int countBytes() {
-        return (M + E + 1) / 4;
-    }
+    int countBytes() { return (M + E + 1) / 4; }
+    int mantBytes() { return (M + 4) / 4; }
 
-    int mantBytes() {
-        return (M + 4) / 4;
+    uint32_t qNan() {
+        return (SING_MASK | (EXP_MASK << M) | (1u << (M - 1))) | (1u << (M - 2));
     }
 };
 
@@ -59,19 +56,59 @@ struct Decode {
     }
 };
 
-int firstBit(uint32_t m) {
-    int cnt = 0;
-    while (m >> cnt) {
-        cnt++;
+struct EndPack {
+    uint64_t mant;
+    int e;
+    bool sign;
+    bool isZero;
+
+    EndPack(uint64_t sig, int e, bool sign, bool isZero) {
+        this->mant = sig;
+        this->e = e;
+        this->sign = sign;
+        this->isZero = isZero;
     }
+};
+
+int firstBit32(uint32_t m) {
+    int cnt = 0;
+    while (m >> cnt) { cnt++; }
     return cnt;
+}
+
+int firstBit64(uint64_t m) {
+    int cnt = 0;
+    while (m >> cnt) { cnt++; }
+    return cnt;
+}
+
+void buildME(Decode d, int &exp, uint64_t &mant, FMT F) {
+    if (d.isZero) {
+        exp = 0;
+        mant = 1 - F.val;
+        return;
+    }
+
+    // вот это не нужно тк все скипается в mult
+    if (d.isDenorm) {
+        mant = (uint64_t) d.m;
+        exp = 1 - F.val;
+    } else {
+        mant = (1u << F.M) | d.m;
+        exp = (int) d.e - F.val;
+    }
+}
+
+void shift(uint64_t &m) {
+    uint64_t l = m & 1ull;
+    m >>= 1;
+    if (l) m |= 1ull;
 }
 
 string valueString(uint32_t num, FMT F) {
     Decode d = Decode(num, F);
     int exp = 0;
     uint32_t mant = d.m;
-
     if (d.isNan) return "nan";
     if (d.isInf) return d.sign ? "-inf" : "inf";
     if (d.isZero) {
@@ -79,14 +116,12 @@ string valueString(uint32_t num, FMT F) {
         return string(d.sign ? "-" : "") + "0x0." + mant + "p+0";
     }
     if (d.isDenorm) {
-        int fb = F.M - firstBit(d.m);
+        int fb = F.M - firstBit32(d.m);
         exp = fb + F.val;
         mant <<= (fb + 1);
         mant &= F.MANT_MASK;
         exp = -exp;
-    } else {
-        exp = d.e - F.val;
-    }
+    } else { exp = d.e - F.val; }
     mant <<= ((F.M + 4) / 4 * 4 - F.M);
     ostringstream os;
     os << hex << setw(F.mantBytes()) << setfill('0') << mant;
@@ -106,15 +141,125 @@ uint32_t parseHexUseLowBits(string s, FMT F) {
     return static_cast<uint32_t>(stoul(s, nullptr, 0));
 }
 
+uint32_t pack(bool sign, uint32_t e, uint32_t m, FMT F) {
+    uint32_t num = ((e & F.EXP_MASK) << F.M) | (m & F.MANT_MASK);
+    if (sign) num |= F.SING_MASK;
+    return num;
+}
+
+static uint32_t finishPack(EndPack &P, FMT &F, string s) {
+    if (P.isZero || !P.mant) return pack(P.sign, 0, 0, F);
+    bitset<64> bits(P.mant);
+    cout << P.e << "  " << bits << "     bit\n";
+    while (P.mant && firstBit64(P.mant) - 1 > F.M) {
+        shift(P.mant);
+        P.e++;
+    }
+
+    while (firstBit64(P.mant) - 1 < F.M && P.e > (1 - F.val)) {
+        P.mant <<= 1;
+        P.e--;
+    }
+    while (P.e <= (1 - F.val)) {
+        shift(P.mant);
+        P.e++;
+    }
+    int fb = firstBit64(P.mant), sh = max(0, fb - F.M - 1);
+    uint64_t kept = P.mant >> sh, r = P.mant & ((1ull << sh) - 1);
+    cout << P.e << "   EXP\n";
+    if (s == "1" && r >= (1ull << (sh - 1))) kept++;
+    if (s == "2" && !P.sign && r) kept++;
+    if (s == "3" && P.sign && r) kept++;
+    while (firstBit64(kept) > F.M + 1) {
+        shift(kept);
+        P.e++;
+    }
+    if (P.e + F.val >= F.EXP_MASK) {
+        if (s == "1" || (s == "2" && !P.sign) || (s == "3" && P.sign)) return pack(P.sign, F.EXP_MASK, 0, F);
+        return pack(P.sign, F.EXP_MASK - 1, F.MANT_MASK, F);
+    }
+    uint32_t ans = (uint32_t) (kept & F.MANT_MASK);
+    if (P.e > 1 - F.val) {
+        return pack(P.sign, P.e + F.val, ans, F);
+    }
+    return pack(P.sign, 0, ans, F);
+}
+
+uint32_t mult(uint32_t A, uint32_t B, FMT F, string s) {
+    Decode a = Decode(A, F), b = Decode(B, F);
+    if (a.isNan) return A;
+    if (b.isNan) return B;
+    if ((a.isInf && b.isZero) || (b.isInf && a.isZero)) return F.qNan();
+    bool sign = a.sign ^ b.sign;
+    if (a.isInf || b.isInf) return pack(sign, F.EXP_MASK, 0, F);
+    if (a.isZero || b.isZero) return pack(sign, 0, 0, F);
+    int exp_a, exp_b;
+    uint64_t mant_a, mant_b;
+    buildME(a, exp_a, mant_a, F);
+    buildME(b, exp_b, mant_b, F);
+    uint64_t comp = mant_a * mant_b;
+    int exp = exp_a + exp_b - F.M;
+    EndPack P{comp, exp, sign, false};
+    
+    return finishPack(P, F, s);
+}
+
+uint32_t div(uint32_t A, uint32_t B, FMT F, string s) {
+    Decode a = Decode(A, F), b = Decode(B, F);
+    if (a.isNan) return A;
+    if (b.isNan) return B;
+    if ((a.isInf && b.isZero) || (b.isInf && a.isZero)) return F.qNan();
+    bool sign = a.sign ^ b.sign;
+    if (a.isInf || b.isZero) return pack(sign, F.EXP_MASK, 0, F);
+    if (a.isZero || b.isInf) return pack(sign, 0, 0, F);
+    int exp_a, exp_b;
+    uint64_t mant_a, mant_b;
+    buildME(a, exp_a, mant_a, F);
+    buildME(b, exp_b, mant_b, F);
+    uint64_t num = ((F.M + 2) >= 64) ? 0ull : ((uint64_t) mant_a << (F.M + 2));
+    uint64_t q = num / mant_b;
+    uint64_t r = num % mant_b;
+    if (r) q |= 1ull;
+    EndPack P{q, exp_a + exp_b - 2, sign, (q == 0)};
+    return finishPack(P, F, s);
+}
+
+uint32_t addsub(uint32_t A, uint32_t B, FMT F, string s, int p) {
+    Decode a = Decode(A, F), b = Decode(B, F);
+    if (a.isNan) return A;
+    if (b.isNan) return B;
+    if ((a.isInf && b.isZero) || (b.isInf && a.isZero)) return F.qNan();
+    bool sign = a.sign ^ b.sign;
+    if (a.isInf || b.isInf) return pack(sign, F.EXP_MASK, 0, F);
+    if (a.isZero || b.isZero) return pack(sign, 0, 0, F);
+    int exp_a, exp_b;
+    uint64_t mant_a, mant_b;
+    buildME(a, exp_a, mant_a, F);
+    buildME(b, exp_b, mant_b, F);
+    uint64_t comp = mant_a * mant_b;
+    int exp = exp_a + exp_b;
+    EndPack P{comp, exp, sign, false};
+    return finishPack(P, F, s);
+}
+
 int main(int argc, char *argv[]) {
     FMT F = FMT(argv[1]);
-
     if (argc == 4) {
         uint32_t num = parseHexUseLowBits(argv[3], F);
         string val = valueString(num, F), h = hexString(num, F);
         cout << val << " " << h << "\n";
     }
     if (argc == 6) {
+        string op = argv[3];
+
+
+        uint32_t a = parseHexUseLowBits(argv[4], F), b = parseHexUseLowBits(argv[5], F), n = 0;
+        if (op == "!") n = mult(a, b, F, argv[2]);
+        if (op == "/") n = div(a, b, F, argv[2]);
+        if (op == "+") n = addsub(a, b, F, argv[2], 1);
+        if (op == "-") n = addsub(a, b, F, argv[2], 0);
+        string val = valueString(n, F), h = hexString(n, F);
+        cout << val << " " << h << "\n";
     }
     if (argc == 7) {
     }
